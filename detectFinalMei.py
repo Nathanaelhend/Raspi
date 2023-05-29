@@ -1,7 +1,7 @@
 import RPi.GPIO as GPIO
 GPIO.setmode(GPIO.BCM)
 GPIO.setwarnings(False)
-GPIO.setup(18,GPIO.OUT) #Pin GPIO 3 kanan + 6 kanan 
+GPIO.setup(26,GPIO.OUT) #Pin GPIO 3 kanan + 6 kanan 
 
 buzzer=17 #Pin GPIO 6 kiri + 5 kiri
 GPIO.setup(buzzer,GPIO.OUT)
@@ -13,14 +13,12 @@ from imutils.video import FileVideoStream
 from imutils.video import VideoStream
 from imutils import face_utils
 from azure.iot.device import IoTHubDeviceClient, Message
-from adafruit_ads1x15.analog_in import AnalogIn
 
-import board
 # import threading
-import busio
-import adafruit_ads1x15.ads1115 as ADS
 import requests
 import time
+import os
+import max30100
 import serial
 import pynmea2
 # import datetime
@@ -45,8 +43,9 @@ print('Connecting')
 device_client.connect()
 print('Connected')
 
-bpm = 0
 TOTAL = 0
+mx30 = max30100.MAX30100()
+mx30.enable_spo2()
 
 # #method EAR untuk deteksi mata
 def eye_aspect_ratio(eye):
@@ -67,12 +66,16 @@ ap.add_argument("-v", "--video", type=str, default="",
 	help="path to input video file")
 args = vars(ap.parse_args())
 
-EYE_AR_THRESH = 0.29
+EYE_AR_THRESH = 0.18
 EYE_AR_CONSEC_FRAMES = 3
+
+last_print_time = time.time()
+bpm_interval = 1.0
 
 COUNTER = 0
 TOTAL = 0
 bpm = 0
+start_time = time.time()
 
 print("[INFO] loading facial landmark predictor...")
 detector = dlib.get_frontal_face_detector()
@@ -89,28 +92,6 @@ vs = VideoStream(src=0).start()
 
 fileStream = False
 time.sleep(1.0)
-
-i2c = busio.I2C(board.SCL, board.SDA)
-
-adc = ADS.ADS1115(i2c)
-# initialization 
-GAIN = 1
-curState = 0
-thresh = 525 
-P = 512
-T = 512
-stateChanged = 0
-sampleCounter = 0
-runningTotal = 0
-lastBeatTime = 0
-firstBeat = True
-secondBeat = False
-Pulse = False
-IBI = 600
-rate = [0]*10
-amp = 100
-
-lastTime = int(time.time()*1000)    
         
 def print_gps_data(line, bpm):
     msg = pynmea2.parse(line)
@@ -128,109 +109,79 @@ def print_gps_data(line, bpm):
         message_json = { "gps" : { "lat":lat, "lon":lon, "bpm":bpm }}
         
         print("Sending telemetry", message_json)
-        message = Message(json.dumps(message_json))
-        device_client.send_message(message)
+        # message = Message(json.dumps(message_json))
+        # device_client.send_message(message)
         
         # url = 'https://api.telegram.org/bot5513926646:AAEWbyK6_AxMWLyAElwWfoDpZ0lAnzPdl3E/sendMessage?chat_id=922321291&text="Sopir Mengantuk!"'
         url = "https://api.telegram.org/bot5513926646:AAEWbyK6_AxMWLyAElwWfoDpZ0lAnzPdl3E/sendMessage?chat_id=922321291&text=Sopir Mengantuk!. Lokasi Sopir http://www.google.com/maps/place/" + str(lat) + "," + str(lon)
-        GPIO.output(18,GPIO.HIGH)
+        GPIO.output(26,GPIO.HIGH)
         
         GPIO.output(buzzer,GPIO.HIGH)
         time.sleep(1)
-        GPIO.output(18, GPIO.LOW)
+        GPIO.output(26, GPIO.LOW)
         GPIO.output(buzzer,GPIO.LOW)
         requests.get(url)      
-        
-while True:
-    Signal = AnalogIn(adc, ADS.P0)   
-    curTime = int(time.time()*1000)
-    
-    sampleCounter += curTime - lastTime;    
-    
-    lastTime = curTime
-    N = sampleCounter - lastBeatTime;    
 
-    if Signal.value < thresh and N > (IBI/5.0)*3.0 :  
-        if Signal.value < T :                        
-          T = Signal.value;                        
+#function menghitung moving average, untuk filter data yang tidak stabil/noise
+def moving_average(numbers):
+    window_size = 4
+    i = 0
+    # moving_averages = []
+    while i < len(numbers) - window_size + 1:
+        this_window = numbers[i : i + window_size]
+        window_average = sum(this_window) / window_size
+        i += 1
+    try:
+        return int((window_average/100))
+    except:
+        pass
 
-    if Signal.value > thresh and  Signal.value > P:           
-        P = Signal.value;                             
-                                            
-    if N > 250 :                                   
-        if  (Signal.value > thresh) and  (Pulse == False) and  (N > (IBI/5.0)*3.0)  :       
-          Pulse = True;                               
-          IBI = sampleCounter - lastBeatTime;        
-          lastBeatTime = sampleCounter;              
-          if secondBeat :                       
-            secondBeat = False;                 
-            for i in range(0,10):            
-              rate[i] = IBI;                      
-
-          if firstBeat :                        
-            firstBeat = False;                   
-            secondBeat = True;                  
-            continue                              
-          runningTotal = 0;                  
-
-          for i in range(0,9):              
-            rate[i] = rate[i+1];                  
-            runningTotal += rate[i];             
-
-          rate[9] = IBI;                         
-          runningTotal += rate[9];                
-          runningTotal /= 10;                     
-          BPM = 60000/runningTotal;             
-          bpm = int(BPM)
-          print ('BPM: {}'.format(bpm))
-          
-          time.sleep(1)
-
-    if Signal.value < thresh and Pulse == True :   
-        Pulse = False;                        
-        amp = P - T;                           
-        thresh = amp/2 + T;                   
-        P = thresh;                           
-        T = thresh;
-        
-    # print(N)
-
-    if N > 5000 :                          
-        thresh = 512;                          
-        P = 512;                               
-        T = 512;                              
-        lastBeatTime = sampleCounter;                
-        firstBeat = True;                      
-        secondBeat = False;
-        bpm = 0
-        print ("no beats found")
-
-    time.sleep(0.01)
-    
-    if bpm  > 40 and bpm <= 55 :
-        try:
-            line = serial.readline().decode('utf-8')
-
-            while len(line) > 0:
-                msg = pynmea2.parse(line)
-                if msg.sentence_type == 'GGA':
-                    print_gps_data(line, bpm)  
-                    break
-                
-                else:
-                    line = serial.readline().decode('utf-8')
-                
-            time.sleep(5)
-
-        except UnicodeDecodeError:
-            line = serial.readline().decode('utf-8')
-            print("gagal")
+#filter hasil yang didapat dari moving average
+def display_filter(moving_average_bpm):
+    try:
+        if(moving_average_bpm<40):
+            moving_average_bpm ='no beats found'
+            moving_average_bpm = 0
+        else:
             
+            return moving_average_bpm
+    except:
+        return moving_average_bpm    
+
+# def HR():
+    
+#         # elapsed_time = time.time() - start_time
+#     mx30.read_sensor()
+#     hb = int(mx30.ir / 100)
+#     spo2 = int(mx30.red / 100)
+#     if mx30.ir != mx30.buffer_ir :
+#         moving_average_bpm = (moving_average(mx30.buffer_ir))
+        
+#     bpm = display_filter(moving_average_bpm)
+
+#     # print("BPM : "+ str(bpm))
+    
+while True:
+    elapsed_time = time.time() - start_time
+    
+    mx30.read_sensor()
+    hb = int(mx30.ir / 100)
+    spo2 = int(mx30.red / 100)
+    if mx30.ir != mx30.buffer_ir :
+        moving_average_bpm = (moving_average(mx30.buffer_ir))
+        
+        bpm = display_filter(moving_average_bpm)
+        
+        current_time = time.time()
+        if current_time - last_print_time >= bpm_interval:
+            print("BPM: " + str(bpm))
+            last_print_time = current_time
+    
     if fileStream and not vs.more():
         break
-
+    
     frame = vs.read()
-    frame = imutils.resize(frame, width=450)
+    frame = imutils.resize(frame, width=500)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     rects = detector(gray, 0)
 
@@ -248,14 +199,14 @@ while True:
         cv2.drawContours(frame, [leftEyeHull], -1, (0, 255, 0), 1)
         cv2.drawContours(frame, [rightEyeHull], -1, (0, 255, 0), 1)
         
-        
         if ear < EYE_AR_THRESH:
             COUNTER += 1
             
         else:
             if COUNTER >= EYE_AR_CONSEC_FRAMES:
                 TOTAL += 1
-                if TOTAL >= 5 or bpm <= 50:
+                   
+                if elapsed_time < 60 and TOTAL >= 6 and bpm is not None and bpm > 40 and bpm <= 80:
                     
                     print("Mengantuk")
                     
@@ -280,8 +231,13 @@ while True:
                         print("gagal")
                                     
                     TOTAL = 0
+                    start_time = time.time()
+                    
+                elif elapsed_time > 60:
+                    start_time = time.time()
+                    TOTAL = 0
         
-            COUNTER = 0	
+                COUNTER = 0	
 
         cv2.putText(frame, "Blinks: {}".format(TOTAL), (10, 30),
             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
@@ -293,6 +249,7 @@ while True:
     
     if key == ord("q"):
         break
-            
+
+
 cv2.destroyAllWindows()
 vs.stop()
